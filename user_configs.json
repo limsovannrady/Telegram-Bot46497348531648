@@ -1,10 +1,8 @@
 {
   "5002402843": {
-    "from": [
-      "-5206716844"
-    ],
-    "to": "5002402843",
-    "enabled": true,
+    "from": [],
+    "to": "me",
+    "enabled": false,
     "autoclick_enabled": true,
     "autoclick_match": "Restore"
   }
