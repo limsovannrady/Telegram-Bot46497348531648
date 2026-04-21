@@ -72,22 +72,48 @@ def set_user_cfg(uid: int, cfg: dict):
 
 
 # ───────────────────────── Session persistence ─────────────────────
+# អាទិភាព: env var SESSION_<uid>  →  /tmp file
+# ក្រោយ login: bot ណែនាំ user ឱ្យ copy session string ទៅ Vercel env var
+# ដើម្បីកុំ login ម្ដងទៀតពេល cold start។
+
+def _env_key(uid: int) -> str:
+    return f"SESSION_{uid}"
+
 
 def session_path(uid: int) -> str:
     return os.path.join(SESSIONS_DIR, f"{uid}.session")
 
 
 def save_session(uid: int, string_session: str):
+    """រក្សាទុកក្នុង /tmp (warm instance) ។ session string ត្រូវបង្ហាញ user
+    ដើម្បីដាក់ជា Vercel env var SESSION_<uid> ដែលនៅជាប់ permanent។"""
     with open(session_path(uid), "w") as f:
         f.write(string_session)
 
 
 def load_session(uid: int) -> str | None:
+    # 1) ពិនិត្យ env var មុន (permanent — survive cold start)
+    s = os.environ.get(_env_key(uid), "").strip()
+    if s:
+        # សរសេរចូល /tmp ផងដែរ ដើម្បីប្រើ Telethon StringSession
+        with open(session_path(uid), "w") as f:
+            f.write(s)
+        return s
+    # 2) fallback ទៅ /tmp (warm instance ប៉ុណ្ណោះ)
     p = session_path(uid)
     if os.path.exists(p):
         with open(p) as f:
             return f.read().strip() or None
     return None
+
+
+def get_session_string(uid: int) -> str | None:
+    """ត្រឡប់ session string ឆៅ (ដើម្បី user copy ទៅ env var)។"""
+    p = session_path(uid)
+    if os.path.exists(p):
+        with open(p) as f:
+            return f.read().strip() or None
+    return os.environ.get(_env_key(uid), "").strip() or None
 
 
 def delete_session(uid: int):
@@ -209,7 +235,8 @@ HELP_TEXT = (
     "/autoclickon — បើក auto-click\n"
     "/autoclickoff — បិទ auto-click\n"
     "/autoclickstatus — ស្ថានភាព\n"
-    "/clicknow — ចុច Restore button ឥឡូវ"
+    "/clicknow — ចុច Restore button ឥឡូវ\n"
+    "/mysession — បង្ហាញ session string (Vercel env var)"
 )
 
 
@@ -223,6 +250,26 @@ def _run(coro):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     return loop.run_until_complete(coro)
+
+
+def _send_session_hint(chat_id: int, uid: int):
+    """ក្រោយ login — ណែនាំ user ឱ្យ copy session string ទៅ Vercel env var
+    ដើម្បីកុំ login ម្ដងទៀតពេល cold start។"""
+    s = get_session_string(uid)
+    if not s:
+        return
+    key = _env_key(uid)
+    send(
+        chat_id,
+        f"🔐 **រក្សា session ឱ្យជាប់ — កុំ login ម្ដងទៀត**\n\n"
+        f"ចម្លង session string ខាងក្រោម ហើយ:\n"
+        f"Vercel Dashboard → Settings → **Environment Variables**\n"
+        f"➕ បន្ថែម:\n"
+        f"  Name: `{key}`\n"
+        f"  Value: _(string ខាងក្រោម)_\n\n"
+        f"```\n{s}\n```\n\n"
+        f"⚠️ _កុំចែករំលែក string នេះជាមួយអ្នកណា — វាដូចជា password!_",
+    )
 
 
 def handle_message(message: dict):
@@ -279,6 +326,15 @@ def handle_message(message: dict):
                  f"👤 **{me['first']} {me['last']}**\n"
                  f"Username: @{me['username'] or '—'}\n"
                  f"ID: `{me['id']}`")
+        return
+
+    # ── /mysession ───────────────────────────────────────────────────
+    if text == "/mysession":
+        s = get_session_string(uid)
+        if not s:
+            send(chat_id, "⚠️ មិនទាន់ login ទេ។ សូម /start មុនសិន។")
+        else:
+            _send_session_hint(chat_id, uid)
         return
 
     # ── /autoclickon ─────────────────────────────────────────────────
@@ -358,6 +414,7 @@ def handle_message(message: dict):
                  f"✅ **Login ជោគជ័យ!**\n\n"
                  f"👤 {me.first_name or ''} {me.last_name or ''}\n"
                  f"ID: `{me.id}`\n\n{HELP_TEXT}")
+            _send_session_hint(chat_id, uid)
         except SessionPasswordNeededError:
             st["step"] = "password"
             send(chat_id, "🔒 Account បើក 2FA។ សូមបញ្ចូលពាក្យសម្ងាត់។")
@@ -373,6 +430,7 @@ def handle_message(message: dict):
                  f"✅ **Login ជោគជ័យ!**\n\n"
                  f"👤 {me.first_name or ''} {me.last_name or ''}\n"
                  f"ID: `{me.id}`\n\n{HELP_TEXT}")
+            _send_session_hint(chat_id, uid)
         except Exception as e:
             send(chat_id, f"⚠️ ពាក្យសម្ងាត់ខុស ឬកំហុស៖ `{e}`")
         return
