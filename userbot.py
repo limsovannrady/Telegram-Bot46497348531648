@@ -77,6 +77,8 @@ def get_user_cfg(uid: int) -> dict:
     data = load_configs()
     cfg = data.get(str(uid), {})
     cfg.setdefault("autoclick_enabled", False)
+    cfg.setdefault("click_limit", 0)   # 0 = គ្មានដែនកំណត់
+    cfg.setdefault("click_count", 0)   # ចំនួនដងដែលបានចុចហើយ
     return cfg
 
 
