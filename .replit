@@ -35,7 +35,7 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3 bot.py"
+args = "python3 userbot.py"
 
 [agent]
 stack = "PNPM_WORKSPACE"
