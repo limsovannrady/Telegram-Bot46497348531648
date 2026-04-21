@@ -5,7 +5,7 @@
     ],
     "to": "5002402843",
     "enabled": true,
-    "autoclick_enabled": true,
-    "autoclick_match": "Restore"
+    "autoclick_enabled": false,
+    "autoclick_match": ""
   }
 }
