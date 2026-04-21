@@ -47,3 +47,8 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+NEON_DATABASE_URL = "postgresql://neondb_owner:npg_WQ3CsjI8lzta@ep-plain-bread-ang1ci96-pooler.c-6.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"

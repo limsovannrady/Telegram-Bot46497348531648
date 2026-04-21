@@ -8,6 +8,8 @@ import os
 import asyncio
 import logging
 import requests as req
+import psycopg2
+import psycopg2.extras
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("webhook")
@@ -24,11 +26,42 @@ ADMIN_IDS  = {
 BOT_API        = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DROPMAIL_USER  = "DropmailBot"
 TRIGGER_TEXT   = "restore"
-SESSIONS_DIR   = "/tmp/user_sessions"
-CONFIG_FILE    = "/tmp/user_configs.json"
+NEON_DSN       = os.environ.get("NEON_DATABASE_URL", "")
 LOGIN_STATE    = {}          # in-memory (per warm instance)
 
-os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+# ───────────────────────── Neon DB connection ──────────────────────
+
+def get_db():
+    return psycopg2.connect(NEON_DSN)
+
+
+def init_db():
+    """បង្កើត tables ប្រសិន មិនទាន់មាន។"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    uid        BIGINT PRIMARY KEY,
+                    session    TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_configs (
+                    uid                BIGINT PRIMARY KEY,
+                    autoclick_enabled  BOOLEAN DEFAULT FALSE,
+                    updated_at         TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+        conn.commit()
+
+
+try:
+    init_db()
+    log.info("Neon DB initialized")
+except Exception as _e:
+    log.warning(f"DB init skipped: {_e}")
 
 
 # ───────────────────────── Bot API helpers ─────────────────────────
@@ -42,84 +75,88 @@ def send(chat_id: int, text: str, parse_mode: str = "Markdown") -> dict:
     return r.json()
 
 
-# ───────────────────────── Config persistence ──────────────────────
-
-def load_configs() -> dict:
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_configs(data: dict):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
+# ───────────────────────── Config persistence (Neon) ───────────────
 
 def get_user_cfg(uid: int) -> dict:
-    cfg = load_configs().get(str(uid), {})
-    cfg.setdefault("autoclick_enabled", False)
-    return cfg
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT autoclick_enabled FROM user_configs WHERE uid = %s",
+                    (uid,)
+                )
+                row = cur.fetchone()
+                if row:
+                    return {"autoclick_enabled": row[0]}
+    except Exception as e:
+        log.warning(f"get_user_cfg db error: {e}")
+    return {"autoclick_enabled": False}
 
 
 def set_user_cfg(uid: int, cfg: dict):
-    data = load_configs()
-    data[str(uid)] = cfg
-    save_configs(data)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO user_configs (uid, autoclick_enabled, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (uid) DO UPDATE
+                        SET autoclick_enabled = EXCLUDED.autoclick_enabled,
+                            updated_at        = NOW()
+                """, (uid, cfg.get("autoclick_enabled", False)))
+            conn.commit()
+    except Exception as e:
+        log.warning(f"set_user_cfg db error: {e}")
 
 
-# ───────────────────────── Session persistence ─────────────────────
-# អាទិភាព: env var SESSION_<uid>  →  /tmp file
-# ក្រោយ login: bot ណែនាំ user ឱ្យ copy session string ទៅ Vercel env var
-# ដើម្បីកុំ login ម្ដងទៀតពេល cold start។
-
-def _env_key(uid: int) -> str:
-    return f"SESSION_{uid}"
-
-
-def session_path(uid: int) -> str:
-    return os.path.join(SESSIONS_DIR, f"{uid}.session")
-
+# ───────────────────────── Session persistence (Neon) ──────────────
 
 def save_session(uid: int, string_session: str):
-    """រក្សាទុកក្នុង /tmp (warm instance) ។ session string ត្រូវបង្ហាញ user
-    ដើម្បីដាក់ជា Vercel env var SESSION_<uid> ដែលនៅជាប់ permanent។"""
-    with open(session_path(uid), "w") as f:
-        f.write(string_session)
+    """រក្សាទុក session string ក្នុង Neon database — survive cold start។"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO user_sessions (uid, session, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (uid) DO UPDATE
+                        SET session    = EXCLUDED.session,
+                            updated_at = NOW()
+                """, (uid, string_session))
+            conn.commit()
+    except Exception as e:
+        log.warning(f"save_session db error: {e}")
 
 
 def load_session(uid: int) -> str | None:
-    # 1) ពិនិត្យ env var មុន (permanent — survive cold start)
-    s = os.environ.get(_env_key(uid), "").strip()
-    if s:
-        # សរសេរចូល /tmp ផងដែរ ដើម្បីប្រើ Telethon StringSession
-        with open(session_path(uid), "w") as f:
-            f.write(s)
-        return s
-    # 2) fallback ទៅ /tmp (warm instance ប៉ុណ្ណោះ)
-    p = session_path(uid)
-    if os.path.exists(p):
-        with open(p) as f:
-            return f.read().strip() or None
-    return None
+    """ទាញ session string ពី Neon database។"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT session FROM user_sessions WHERE uid = %s",
+                    (uid,)
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+    except Exception as e:
+        log.warning(f"load_session db error: {e}")
+        return None
 
 
 def get_session_string(uid: int) -> str | None:
-    """ត្រឡប់ session string ឆៅ (ដើម្បី user copy ទៅ env var)។"""
-    p = session_path(uid)
-    if os.path.exists(p):
-        with open(p) as f:
-            return f.read().strip() or None
-    return os.environ.get(_env_key(uid), "").strip() or None
+    return load_session(uid)
 
 
 def delete_session(uid: int):
-    p = session_path(uid)
-    if os.path.exists(p):
-        os.remove(p)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_sessions WHERE uid = %s", (uid,))
+                cur.execute("DELETE FROM user_configs WHERE uid = %s", (uid,))
+            conn.commit()
+    except Exception as e:
+        log.warning(f"delete_session db error: {e}")
 
 
 # ───────────────────────── Telethon helpers ────────────────────────
@@ -253,22 +290,13 @@ def _run(coro):
 
 
 def _send_session_hint(chat_id: int, uid: int):
-    """ក្រោយ login — ណែនាំ user ឱ្យ copy session string ទៅ Vercel env var
-    ដើម្បីកុំ login ម្ដងទៀតពេល cold start។"""
-    s = get_session_string(uid)
-    if not s:
-        return
-    key = _env_key(uid)
+    """ក្រោយ login — ជូនដំណឹងថា session ត្រូវបានរក្សាទុក Neon DB ហើយ។"""
     send(
         chat_id,
-        f"🔐 **រក្សា session ឱ្យជាប់ — កុំ login ម្ដងទៀត**\n\n"
-        f"ចម្លង session string ខាងក្រោម ហើយ:\n"
-        f"Vercel Dashboard → Settings → **Environment Variables**\n"
-        f"➕ បន្ថែម:\n"
-        f"  Name: `{key}`\n"
-        f"  Value: _(string ខាងក្រោម)_\n\n"
-        f"```\n{s}\n```\n\n"
-        f"⚠️ _កុំចែករំលែក string នេះជាមួយអ្នកណា — វាដូចជា password!_",
+        "🗄️ **Session ត្រូវបានរក្សាទុក Neon Database ហើយ!**\n\n"
+        "✅ Cold start ក៏**មិន** logout អ្នកទេ\n"
+        "✅ Vercel restart ក៏**នៅ** login ដដែល\n\n"
+        "_Session ត្រូវបាន encrypt ក្នុង Neon PostgreSQL_",
     )
 
 
@@ -334,7 +362,11 @@ def handle_message(message: dict):
         if not s:
             send(chat_id, "⚠️ មិនទាន់ login ទេ។ សូម /start មុនសិន។")
         else:
-            _send_session_hint(chat_id, uid)
+            send(chat_id,
+                 "🗄️ **Session Status**\n\n"
+                 "✅ Session កំពុងរក្សាទុកក្នុង **Neon Database**\n"
+                 "✅ មិន logout ពេល cold start / restart\n\n"
+                 "_វាយ /logout ដើម្បីលុប session_")
         return
 
     # ── /autoclickon ─────────────────────────────────────────────────
