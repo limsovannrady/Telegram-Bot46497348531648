@@ -77,8 +77,6 @@ def get_user_cfg(uid: int) -> dict:
     data = load_configs()
     cfg = data.get(str(uid), {})
     cfg.setdefault("autoclick_enabled", False)
-    cfg.setdefault("click_limit", 0)   # 0 = គ្មានដែនកំណត់
-    cfg.setdefault("click_count", 0)   # ចំនួនដងដែលបានចុចហើយ
     return cfg
 
 
@@ -174,17 +172,27 @@ async def install_autoclick_handler(uid: int):
         flat = [b for row in msg.buttons for b in row]
         if not flat:
             return
-        try:
-            await msg.click(0)
-            clicked_ids.add(msg.id)
-            label = getattr(flat[0], "text", "?")
-            log.info(f"uid={uid} autoclicked: {label}")
+        clicked_ids.add(msg.id)
+        labels = []
+        for i, btn in enumerate(flat):
             try:
-                await bot.send_message(uid, f"🤖 Auto-clicked Restore: **{label}**", parse_mode="md")
+                await msg.click(i)
+                label = getattr(btn, "text", f"#{i+1}")
+                labels.append(label)
+                log.info(f"uid={uid} autoclicked button {i}: {label}")
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                log.warning(f"uid={uid} autoclick button {i} failed: {e}")
+        if labels:
+            try:
+                summary = "\n".join(f"  ✅ {l}" for l in labels)
+                await bot.send_message(
+                    uid,
+                    f"🤖 Auto-clicked **{len(labels)}** button(s):\n{summary}",
+                    parse_mode="md",
+                )
             except Exception:
                 pass
-        except Exception as e:
-            log.warning(f"uid={uid} autoclick failed: {e}")
 
     client.add_event_handler(handler, events.NewMessage(chats=dropmail))
     client.add_event_handler(handler, events.MessageEdited(chats=dropmail))
