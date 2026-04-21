@@ -359,6 +359,172 @@ async def cmd_fwdstatus(event):
     )
 
 
+# -------------------- Inline button interaction --------------------
+# OPEN_CHAT[uid] = {"peer": <entity>, "msg_id": <int>}
+OPEN_CHAT: dict[int, dict] = {}
+
+
+def _format_buttons(message) -> str:
+    """បំលែង buttons ទៅជាអត្ថបទមានលេខ"""
+    if not message.buttons:
+        return "_(សារនេះគ្មាន button)_"
+    lines = []
+    n = 1
+    for row in message.buttons:
+        for btn in row:
+            label = getattr(btn, "text", str(btn))
+            lines.append(f"`{n}`. {label}")
+            n += 1
+    return "\n".join(lines)
+
+
+def _flat_buttons(message):
+    flat = []
+    if not message.buttons:
+        return flat
+    for row in message.buttons:
+        for btn in row:
+            flat.append(btn)
+    return flat
+
+
+@bot.on(events.NewMessage(pattern=r"^/open(?:\s+(.+))?$"))
+async def cmd_open(event):
+    uid = event.sender_id
+    client = await start_user_client(uid)
+    if not client:
+        await event.reply("⚠️ សូម /start ដើម្បី login មុនសិន។")
+        return
+    arg = event.pattern_match.group(1)
+    if not arg:
+        await event.reply("ប្រើបែបនេះ៖ `/open @DropmailBot` ឬ `/open -100123456789`", parse_mode="md")
+        return
+    target = arg.strip()
+    try:
+        peer = await client.get_entity(int(target) if target.lstrip("-").isdigit() else target)
+    except Exception as e:
+        await event.reply(f"❌ រក chat មិនឃើញ៖ `{e}`", parse_mode="md")
+        return
+
+    # ទាញសារចុងក្រោយពីchat នោះ
+    msgs = await client.get_messages(peer, limit=1)
+    if not msgs:
+        # បើមិនទាន់ធ្លាប់ chat សូមផ្ញើ /start ទៅ bot នោះ
+        await client.send_message(peer, "/start")
+        await asyncio.sleep(2)
+        msgs = await client.get_messages(peer, limit=1)
+
+    if not msgs:
+        await event.reply("⚠️ មិនមានសារ។")
+        return
+
+    m = msgs[0]
+    OPEN_CHAT[uid] = {"peer": peer, "msg_id": m.id}
+
+    text = m.message or "_(គ្មានអត្ថបទ)_"
+    buttons_text = _format_buttons(m)
+    await event.reply(
+        f"**💬 សារចុងក្រោយពី `{getattr(peer, 'username', None) or peer.id}`៖**\n\n"
+        f"{text}\n\n"
+        f"**🔘 Buttons៖**\n{buttons_text}\n\n"
+        f"វាយ `/btn <លេខ>` ដើម្បីចុច • `/send <text>` ដើម្បីផ្ញើសារ • `/refresh` ដើម្បី refresh",
+        parse_mode="md",
+    )
+
+
+@bot.on(events.NewMessage(pattern=r"^/btn(?:\s+(\d+))?$"))
+async def cmd_btn(event):
+    uid = event.sender_id
+    state = OPEN_CHAT.get(uid)
+    if not state:
+        await event.reply("⚠️ វាយ `/open @botusername` មុនសិន។", parse_mode="md")
+        return
+    arg = event.pattern_match.group(1)
+    if not arg:
+        await event.reply("ប្រើបែបនេះ៖ `/btn 1`", parse_mode="md")
+        return
+    idx = int(arg)
+    client = await start_user_client(uid)
+    if not client:
+        await event.reply("⚠️ Session បាត់។ សូម /start ម្តងទៀត។")
+        return
+    try:
+        m = await client.get_messages(state["peer"], ids=state["msg_id"])
+    except Exception as e:
+        await event.reply(f"❌ `{e}`", parse_mode="md")
+        return
+    flat = _flat_buttons(m)
+    if idx < 1 or idx > len(flat):
+        await event.reply(f"⚠️ លេខ button មិនត្រឹមត្រូវ (១ ដល់ {len(flat)})")
+        return
+    btn = flat[idx - 1]
+    try:
+        result = await m.click(idx - 1)
+    except Exception as e:
+        await event.reply(f"❌ ចុចមិនបាន៖ `{e}`", parse_mode="md")
+        return
+
+    # រង់ចាំ reply ថ្មីបន្តិច
+    await event.reply(f"✅ បានចុច៖ **{getattr(btn, 'text', '?')}**", parse_mode="md")
+    await asyncio.sleep(2)
+    msgs = await client.get_messages(state["peer"], limit=1)
+    if msgs and msgs[0].id != state["msg_id"]:
+        new = msgs[0]
+        OPEN_CHAT[uid]["msg_id"] = new.id
+        await event.reply(
+            f"**📩 សារថ្មី៖**\n\n{new.message or '_(គ្មានអត្ថបទ)_'}\n\n"
+            f"**🔘 Buttons៖**\n{_format_buttons(new)}",
+            parse_mode="md",
+        )
+
+
+@bot.on(events.NewMessage(pattern=r"^/send\s+(.+)$"))
+async def cmd_send(event):
+    uid = event.sender_id
+    state = OPEN_CHAT.get(uid)
+    if not state:
+        await event.reply("⚠️ វាយ `/open @botusername` មុនសិន។", parse_mode="md")
+        return
+    client = await start_user_client(uid)
+    if not client:
+        return
+    text = event.pattern_match.group(1)
+    await client.send_message(state["peer"], text)
+    await asyncio.sleep(2)
+    msgs = await client.get_messages(state["peer"], limit=1)
+    if msgs:
+        new = msgs[0]
+        OPEN_CHAT[uid]["msg_id"] = new.id
+        await event.reply(
+            f"✅ ផ្ញើរួច។\n\n**📩 សារថ្មី៖**\n{new.message or '_(គ្មានអត្ថបទ)_'}\n\n"
+            f"**🔘 Buttons៖**\n{_format_buttons(new)}",
+            parse_mode="md",
+        )
+
+
+@bot.on(events.NewMessage(pattern=r"^/refresh$"))
+async def cmd_refresh(event):
+    uid = event.sender_id
+    state = OPEN_CHAT.get(uid)
+    if not state:
+        await event.reply("⚠️ គ្មាន chat បើក។ វាយ `/open @botusername` មុន។", parse_mode="md")
+        return
+    client = await start_user_client(uid)
+    if not client:
+        return
+    msgs = await client.get_messages(state["peer"], limit=1)
+    if not msgs:
+        await event.reply("⚠️ គ្មានសារ។")
+        return
+    new = msgs[0]
+    OPEN_CHAT[uid]["msg_id"] = new.id
+    await event.reply(
+        f"**📩 សារចុងក្រោយ៖**\n\n{new.message or '_(គ្មានអត្ថបទ)_'}\n\n"
+        f"**🔘 Buttons៖**\n{_format_buttons(new)}",
+        parse_mode="md",
+    )
+
+
 # -------------------- Login conversation --------------------
 @bot.on(events.NewMessage(func=lambda e: e.is_private and not (e.raw_text or "").startswith("/")))
 async def login_flow(event):
