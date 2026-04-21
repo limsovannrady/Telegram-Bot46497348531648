@@ -33,6 +33,22 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 bot = TelegramClient("bot", API_ID, API_HASH)
 
+# Admin gate — មានតែ user ID ទាំងនេះទេដែលអាចប្រើ bot បាន
+ADMIN_IDS = {int(x) for x in os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip().lstrip("-").isdigit()}
+
+
+@bot.on(events.NewMessage())
+async def _admin_gate(event):
+    if not event.is_private:
+        raise events.StopPropagation
+    if ADMIN_IDS and event.sender_id not in ADMIN_IDS:
+        try:
+            await event.reply("⛔ អ្នកមិនមានសិទ្ធិប្រើ bot នេះទេ។")
+        except Exception:
+            pass
+        log.info(f"Blocked non-admin uid={event.sender_id}")
+        raise events.StopPropagation
+
 # In-memory state
 LOGIN_STATE: dict[int, dict] = {}       # uid -> login flow state
 USER_CLIENTS: dict[int, TelegramClient] = {}  # uid -> running user TelegramClient
