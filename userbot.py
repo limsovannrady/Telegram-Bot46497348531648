@@ -1,9 +1,8 @@
 """
-Telegram Auto-Click Bot (@DropmailBot)
+Telegram Auto-Click Bot សម្រាប់ @DropmailBot
 
-មុខងារ៖
-- Admin login ចូល personal account តាម bot
-- Auto-click inline button (ឧ. "Restore") រាល់សារពី @DropmailBot
+នៅពេលណា @DropmailBot ផ្ញើ (ឬកែ) សារដែលមានពាក្យ "Restore" និង inline button,
+bot នឹងចុច button ដំបូងដោយស្វ័យប្រវត្តិ (ដើម្បីរំកិលអ៊ីមែលត្រឡប់មកវិញ)។
 """
 import os
 import json
@@ -33,6 +32,7 @@ CONFIG_FILE = "user_configs.json"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 DROPMAIL_USERNAME = "DropmailBot"
+TRIGGER_TEXT = "restore"  # match នៅក្នុងអត្ថបទសារ (case-insensitive)
 
 bot = TelegramClient("bot", API_ID, API_HASH)
 
@@ -77,7 +77,6 @@ def get_user_cfg(uid: int) -> dict:
     data = load_configs()
     cfg = data.get(str(uid), {})
     cfg.setdefault("autoclick_enabled", False)
-    cfg.setdefault("autoclick_match", "")
     return cfg
 
 
@@ -105,7 +104,7 @@ def load_session(uid: int) -> str | None:
     return None
 
 
-# -------------------- User client management --------------------
+# -------------------- User client --------------------
 async def start_user_client(uid: int) -> TelegramClient | None:
     if uid in USER_CLIENTS:
         return USER_CLIENTS[uid]
@@ -133,7 +132,8 @@ async def stop_user_client(uid: int):
 
 
 async def install_autoclick_handler(uid: int):
-    """Auto-click buttons on new/edited messages from @DropmailBot."""
+    """ស្តាប់ new + edited messages ពី @DropmailBot ហើយចុច button ដំបូង
+    នៅពេលអត្ថបទសារមានពាក្យ 'restore'។"""
     client = USER_CLIENTS.get(uid)
     if not client:
         return
@@ -155,43 +155,30 @@ async def install_autoclick_handler(uid: int):
         log.warning(f"uid={uid} cannot resolve @{DROPMAIL_USERNAME}: {e}")
         return
 
-    match = (cfg.get("autoclick_match") or "").strip().lower()
+    # រក្សាទុក message IDs ដែលបានចុចរួច ដើម្បីកុំចុចច្រើនដង
+    clicked_ids: set[int] = set()
 
     async def handler(event):
         if event.chat_id != dropmail.id:
             return
         msg = event.message
+        text = (msg.message or "").lower()
+        if TRIGGER_TEXT not in text:
+            return
         if not msg.buttons:
+            return
+        if msg.id in clicked_ids:
             return
         flat = [b for row in msg.buttons for b in row]
         if not flat:
             return
-
-        target_idx = None
-        if match:
-            if match.isdigit():
-                n = int(match) - 1
-                if 0 <= n < len(flat):
-                    target_idx = n
-            else:
-                for i, b in enumerate(flat):
-                    if match in (getattr(b, "text", "") or "").lower():
-                        target_idx = i
-                        break
-        else:
-            target_idx = 0
-
-        if target_idx is None:
-            labels = [getattr(b, "text", "") or repr(b) for b in flat]
-            log.info(f"uid={uid} autoclick: no matching button for '{match}'. Buttons: {labels}")
-            return
-
         try:
-            await msg.click(target_idx)
-            label = getattr(flat[target_idx], "text", "?")
-            log.info(f"uid={uid} autoclicked button[{target_idx}]: {label}")
+            await msg.click(0)
+            clicked_ids.add(msg.id)
+            label = getattr(flat[0], "text", "?")
+            log.info(f"uid={uid} autoclicked: {label}")
             try:
-                await bot.send_message(uid, f"🤖 Auto-clicked: **{label}**", parse_mode="md")
+                await bot.send_message(uid, f"🤖 Auto-clicked Restore: **{label}**", parse_mode="md")
             except Exception:
                 pass
         except Exception as e:
@@ -200,7 +187,7 @@ async def install_autoclick_handler(uid: int):
     client.add_event_handler(handler, events.NewMessage(chats=dropmail))
     client.add_event_handler(handler, events.MessageEdited(chats=dropmail))
     AUTOCLICK_HANDLERS[uid] = handler
-    log.info(f"uid={uid} autoclick handler installed (match='{match}', new+edited)")
+    log.info(f"uid={uid} autoclick handler installed (trigger='{TRIGGER_TEXT}' in text)")
 
 
 # -------------------- Login flow --------------------
@@ -218,11 +205,10 @@ HELP_TEXT = (
     "/start — ចាប់ផ្ដើម / បង្ហាញ menu\n"
     "/me — ព័ត៌មាន account\n"
     "/logout — លុប session\n"
-    "/cancel — បោះបង់ការ login\n\n"
-    "**🤖 Auto-Click @DropmailBot**\n"
-    "/autoclickon `[keyword]` — បើក (keyword ជម្រើស)\n"
+    "/cancel — បោះបង់ការ login\n"
+    "/autoclickon — បើក auto-click Restore\n"
     "/autoclickoff — បិទ\n"
-    "/autoclickstatus — បង្ហាញស្ថានភាព"
+    "/autoclickstatus — ស្ថានភាព"
 )
 
 
@@ -279,24 +265,21 @@ async def cmd_me(event):
     )
 
 
-# -------------------- Auto-click commands --------------------
-@bot.on(events.NewMessage(pattern=r"^/autoclickon(?:\s+(.+))?$"))
+@bot.on(events.NewMessage(pattern=r"^/autoclickon$"))
 async def cmd_autoclickon(event):
     uid = event.sender_id
     if not load_session(uid):
         await event.reply("⚠️ សូម /start មុនសិន។")
         return
-    arg = event.pattern_match.group(1)
     cfg = get_user_cfg(uid)
     cfg["autoclick_enabled"] = True
-    cfg["autoclick_match"] = (arg or "").strip()
     set_user_cfg(uid, cfg)
     await start_user_client(uid)
     await install_autoclick_handler(uid)
-    match_desc = f"button ដែលផ្គូផ្គង `{cfg['autoclick_match']}`" if cfg["autoclick_match"] else "button **ទី 1**"
     await event.reply(
-        f"🤖 Auto-click **បើក** សម្រាប់ @{DROPMAIL_USERNAME}\n"
-        f"នឹងចុច {match_desc} ដោយស្វ័យប្រវត្តិ។",
+        f"🤖 Auto-click **បើក** ហើយ។\n\n"
+        f"រាល់ពេល @{DROPMAIL_USERNAME} ផ្ញើ/កែសារដែលមានពាក្យ **Restore** "
+        f"bot នឹងចុច inline button ដំបូងដោយស្វ័យប្រវត្តិ។",
         parse_mode="md",
     )
 
@@ -316,11 +299,10 @@ async def cmd_autoclickstatus(event):
     uid = event.sender_id
     cfg = get_user_cfg(uid)
     state = "🟢 បើក" if cfg.get("autoclick_enabled") else "🔴 បិទ"
-    match = cfg.get("autoclick_match") or "(button ទី 1)"
     await event.reply(
         f"**🤖 Auto-click @{DROPMAIL_USERNAME}**\n"
         f"Status: {state}\n"
-        f"Match: `{match}`",
+        f"Trigger: អត្ថបទសារមានពាក្យ `Restore`",
         parse_mode="md",
     )
 
@@ -437,11 +419,10 @@ async def restore_all_user_clients():
 
 BOT_COMMANDS = [
     ("start", "ចាប់ផ្ដើម / បង្ហាញ menu"),
-    ("help", "បង្ហាញ commands"),
     ("me", "ព័ត៌មាន account"),
     ("logout", "លុប session"),
     ("cancel", "បោះបង់ការ login"),
-    ("autoclickon", "បើក auto-click @DropmailBot"),
+    ("autoclickon", "បើក auto-click Restore"),
     ("autoclickoff", "បិទ auto-click"),
     ("autoclickstatus", "ស្ថានភាព auto-click"),
 ]
