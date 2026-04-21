@@ -4,6 +4,8 @@
       "-5206716844"
     ],
     "to": "5002402843",
-    "enabled": true
+    "enabled": true,
+    "autoclick_enabled": true,
+    "autoclick_match": ""
   }
 }
