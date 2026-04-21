@@ -191,8 +191,9 @@ async def install_autoclick_handler(uid: int):
             log.warning(f"uid={uid} autoclick failed: {e}")
 
     client.add_event_handler(handler, events.NewMessage(chats=dropmail))
+    client.add_event_handler(handler, events.MessageEdited(chats=dropmail))
     AUTOCLICK_HANDLERS[uid] = handler
-    log.info(f"uid={uid} autoclick handler installed (match='{match}')")
+    log.info(f"uid={uid} autoclick handler installed (match='{match}', new+edited)")
 
 
 async def install_forward_handler(uid: int):
