@@ -252,24 +252,41 @@ async def cleanup_login(uid: int):
             pass
 
 
-@bot.on(events.NewMessage(pattern=r"^/start$"))
+HELP_TEXT = (
+    "📖 **Commands ទាំងអស់**\n\n"
+    "**👤 Account**\n"
+    "/start — ចាប់ផ្ដើម / បង្ហាញ menu\n"
+    "/me — ព័ត៌មាន account\n"
+    "/logout — លុប session\n"
+    "/cancel — បោះបង់ការ login\n\n"
+    "**💬 Chats**\n"
+    "/groups — បង្ហាញបញ្ជី groups និង channels\n\n"
+    "**🔁 Auto-Forward**\n"
+    "/setfrom `<ids>` — កំណត់ chat ប្រភព (បំបែកដោយ comma)\n"
+    "/setto `<id|me>` — កំណត់ chat គោលដៅ\n"
+    "/fwdon — បើក\n"
+    "/fwdoff — បិទ\n"
+    "/fwdstatus — បង្ហាញស្ថានភាព\n\n"
+    "**🤖 Auto-Click @DropmailBot**\n"
+    "/autoclickon `[keyword]` — បើក (keyword សម្រាប់ផ្គូផ្គង label)\n"
+    "/autoclickoff — បិទ\n"
+    "/autoclickstatus — បង្ហាញស្ថានភាព\n\n"
+    "**🔘 ចុច Inline Buttons (manual)**\n"
+    "/open `<@bot>` — បើក chat\n"
+    "/btn `<លេខ>` — ចុច button\n"
+    "/send `<text>` — ផ្ញើសារ\n"
+    "/refresh — refresh សារចុងក្រោយ"
+)
+
+
+@bot.on(events.NewMessage(pattern=r"^/(start|help|menu)$"))
 async def cmd_start(event):
     uid = event.sender_id
     if load_session(uid):
         await event.reply(
-            "✅ អ្នកបាន login រួចហើយ។\n\n"
-            "Commands:\n"
-            "/groups — បង្ហាញបញ្ជី groups និង channels\n"
-            "/me — ព័ត៌មាន account\n"
-            "/setfrom `<ids>` — កំណត់ chat ប្រភព (បំបែកដោយ comma)\n"
-            "/setto `<id|me>` — កំណត់ chat គោលដៅ\n"
-            "/fwdon — បើក auto-forward\n"
-            "/fwdoff — បិទ auto-forward\n"
-            "/fwdstatus — បង្ហាញការកំណត់\n"
-            "/logout — លុប session",
+            f"✅ អ្នកបាន login រួចហើយ។\n\n{HELP_TEXT}",
             parse_mode="md",
         )
-        # ធានាថា client ដំណើរការ
         await start_user_client(uid)
         return
 
@@ -278,7 +295,8 @@ async def cmd_start(event):
         "👋 **សួស្តី!**\n\n"
         "📱 សូមបញ្ចូលលេខទូរស័ព្ទរបស់អ្នកជាមួយកូដប្រទេស\n"
         "_(ឧ. `+855xxxxxxxx`)_\n\n"
-        "វាយ /cancel ដើម្បីបោះបង់",
+        "វាយ /cancel ដើម្បីបោះបង់\n\n"
+        f"{HELP_TEXT}",
         parse_mode="md",
     )
     LOGIN_STATE[uid] = {"step": "phone"}
