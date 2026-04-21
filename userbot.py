@@ -192,7 +192,8 @@ async def install_autoclick_handler(uid: int):
             target_idx = 0  # ចុចជាលើកទី 1
 
         if target_idx is None:
-            log.info(f"uid={uid} autoclick: no matching button for '{match}'")
+            labels = [getattr(b, "text", "") or repr(b) for b in flat]
+            log.info(f"uid={uid} autoclick: no matching button for '{match}'. Buttons: {labels}")
             return
 
         try:
