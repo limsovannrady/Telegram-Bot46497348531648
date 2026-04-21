@@ -1,9 +1,5 @@
 {
   "5002402843": {
-    "from": [],
-    "to": "me",
-    "enabled": false,
-    "autoclick_enabled": true,
-    "autoclick_match": "Restore"
+    "autoclick_enabled": true
   }
 }
