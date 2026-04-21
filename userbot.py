@@ -10,7 +10,8 @@ import asyncio
 import logging
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import Channel, Chat
+from telethon.tl.types import Channel, Chat, BotCommand, BotCommandScopeDefault
+from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.errors import (
     PhoneCodeInvalidError,
     PhoneCodeExpiredError,
@@ -787,10 +788,45 @@ async def restore_all_user_clients():
                 log.warning(f"Failed to restore {fname}: {e}")
 
 
+BOT_COMMANDS = [
+    ("start", "ចាប់ផ្ដើម / បង្ហាញ menu"),
+    ("help", "បង្ហាញ commands ទាំងអស់"),
+    ("me", "ព័ត៌មាន account"),
+    ("groups", "បញ្ជី groups និង channels"),
+    ("logout", "លុប session"),
+    ("cancel", "បោះបង់ការ login"),
+    ("setfrom", "កំណត់ chat ប្រភព auto-forward"),
+    ("setto", "កំណត់ chat គោលដៅ auto-forward"),
+    ("fwdon", "បើក auto-forward"),
+    ("fwdoff", "បិទ auto-forward"),
+    ("fwdstatus", "ស្ថានភាព auto-forward"),
+    ("autoclickon", "បើក auto-click @DropmailBot"),
+    ("autoclickoff", "បិទ auto-click"),
+    ("autoclickstatus", "ស្ថានភាព auto-click"),
+    ("open", "បើក chat ដើម្បីចុច inline buttons"),
+    ("btn", "ចុច button តាមលេខ"),
+    ("send", "ផ្ញើសារទៅ chat ដែលបើក"),
+    ("refresh", "refresh សារចុងក្រោយ"),
+]
+
+
+async def register_bot_commands():
+    try:
+        await bot(SetBotCommandsRequest(
+            scope=BotCommandScopeDefault(),
+            lang_code="",
+            commands=[BotCommand(command=c, description=d) for c, d in BOT_COMMANDS],
+        ))
+        log.info("Bot commands registered")
+    except Exception as e:
+        log.warning(f"Failed to register bot commands: {e}")
+
+
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
     print(f"✅ Bot started as: @{me.username}")
+    await register_bot_commands()
     await restore_all_user_clients()
     print("Ready. Open the bot and send /start")
     await bot.run_until_disconnected()
