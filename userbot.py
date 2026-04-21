@@ -36,6 +36,9 @@ bot = TelegramClient("bot", API_ID, API_HASH)
 LOGIN_STATE: dict[int, dict] = {}       # uid -> login flow state
 USER_CLIENTS: dict[int, TelegramClient] = {}  # uid -> running user TelegramClient
 USER_HANDLERS: dict[int, object] = {}   # uid -> forward handler reference
+AUTOCLICK_HANDLERS: dict[int, object] = {}  # uid -> autoclick handler reference
+
+DROPMAIL_USERNAME = "DropmailBot"
 
 # -------------------- Config persistence --------------------
 def load_configs() -> dict:
@@ -55,7 +58,13 @@ def save_configs(data: dict):
 
 def get_user_cfg(uid: int) -> dict:
     data = load_configs()
-    return data.get(str(uid), {"from": [], "to": "me", "enabled": False})
+    cfg = data.get(str(uid), {})
+    cfg.setdefault("from", [])
+    cfg.setdefault("to", "me")
+    cfg.setdefault("enabled", False)
+    cfg.setdefault("autoclick_enabled", False)
+    cfg.setdefault("autoclick_match", "")  # empty = click first button
+    return cfg
 
 
 def set_user_cfg(uid: int, cfg: dict):
@@ -97,6 +106,7 @@ async def start_user_client(uid: int) -> TelegramClient | None:
         return None
     USER_CLIENTS[uid] = client
     await install_forward_handler(uid)
+    await install_autoclick_handler(uid)
     return client
 
 
@@ -108,6 +118,80 @@ async def stop_user_client(uid: int):
         except Exception:
             pass
     USER_HANDLERS.pop(uid, None)
+    AUTOCLICK_HANDLERS.pop(uid, None)
+
+
+async def install_autoclick_handler(uid: int):
+    """Auto-click buttons on new messages from @DropmailBot."""
+    client = USER_CLIENTS.get(uid)
+    if not client:
+        return
+
+    old = AUTOCLICK_HANDLERS.pop(uid, None)
+    if old is not None:
+        try:
+            client.remove_event_handler(old)
+        except Exception:
+            pass
+
+    cfg = get_user_cfg(uid)
+    if not cfg.get("autoclick_enabled"):
+        return
+
+    try:
+        dropmail = await client.get_entity(DROPMAIL_USERNAME)
+    except Exception as e:
+        log.warning(f"uid={uid} cannot resolve @{DROPMAIL_USERNAME}: {e}")
+        return
+
+    match = (cfg.get("autoclick_match") or "").strip().lower()
+
+    async def handler(event):
+        if event.chat_id != dropmail.id:
+            return
+        msg = event.message
+        if not msg.buttons:
+            return
+        flat = []
+        for row in msg.buttons:
+            for b in row:
+                flat.append(b)
+        if not flat:
+            return
+
+        target_idx = None
+        if match:
+            # ផ្គូផ្គងតាម label (substring ឬលេខ)
+            if match.isdigit():
+                n = int(match) - 1
+                if 0 <= n < len(flat):
+                    target_idx = n
+            else:
+                for i, b in enumerate(flat):
+                    if match in (getattr(b, "text", "") or "").lower():
+                        target_idx = i
+                        break
+        else:
+            target_idx = 0  # ចុចជាលើកទី 1
+
+        if target_idx is None:
+            log.info(f"uid={uid} autoclick: no matching button for '{match}'")
+            return
+
+        try:
+            await msg.click(target_idx)
+            label = getattr(flat[target_idx], "text", "?")
+            log.info(f"uid={uid} autoclicked button[{target_idx}]: {label}")
+            try:
+                await bot.send_message(uid, f"🤖 Auto-clicked: **{label}**", parse_mode="md")
+            except Exception:
+                pass
+        except Exception as e:
+            log.warning(f"uid={uid} autoclick failed: {e}")
+
+    client.add_event_handler(handler, events.NewMessage(chats=dropmail))
+    AUTOCLICK_HANDLERS[uid] = handler
+    log.info(f"uid={uid} autoclick handler installed (match='{match}')")
 
 
 async def install_forward_handler(uid: int):
@@ -341,6 +425,51 @@ async def cmd_fwdoff(event):
     set_user_cfg(uid, cfg)
     await install_forward_handler(uid)
     await event.reply("⏸️ Auto-forward **បិទ** ហើយ។", parse_mode="md")
+
+
+@bot.on(events.NewMessage(pattern=r"^/autoclickon(?:\s+(.+))?$"))
+async def cmd_autoclickon(event):
+    uid = event.sender_id
+    if not load_session(uid):
+        await event.reply("⚠️ សូម /start មុនសិន។")
+        return
+    arg = event.pattern_match.group(1)
+    cfg = get_user_cfg(uid)
+    cfg["autoclick_enabled"] = True
+    cfg["autoclick_match"] = (arg or "").strip()
+    set_user_cfg(uid, cfg)
+    await start_user_client(uid)
+    await install_autoclick_handler(uid)
+    match_desc = f"button ដែលផ្គូផ្គង `{cfg['autoclick_match']}`" if cfg["autoclick_match"] else "button **ទី 1**"
+    await event.reply(
+        f"🤖 Auto-click **បើក** សម្រាប់ @{DROPMAIL_USERNAME}\n"
+        f"នឹងចុច {match_desc} ដោយស្វ័យប្រវត្តិនៅពេលមានសារថ្មី។",
+        parse_mode="md",
+    )
+
+
+@bot.on(events.NewMessage(pattern=r"^/autoclickoff$"))
+async def cmd_autoclickoff(event):
+    uid = event.sender_id
+    cfg = get_user_cfg(uid)
+    cfg["autoclick_enabled"] = False
+    set_user_cfg(uid, cfg)
+    await install_autoclick_handler(uid)
+    await event.reply("⏸️ Auto-click **បិទ** ហើយ។", parse_mode="md")
+
+
+@bot.on(events.NewMessage(pattern=r"^/autoclickstatus$"))
+async def cmd_autoclickstatus(event):
+    uid = event.sender_id
+    cfg = get_user_cfg(uid)
+    state = "🟢 បើក" if cfg.get("autoclick_enabled") else "🔴 បិទ"
+    match = cfg.get("autoclick_match") or "(button ទី 1)"
+    await event.reply(
+        f"**🤖 Auto-click @{DROPMAIL_USERNAME}**\n"
+        f"Status: {state}\n"
+        f"Match: `{match}`",
+        parse_mode="md",
+    )
 
 
 @bot.on(events.NewMessage(pattern=r"^/fwdstatus$"))
