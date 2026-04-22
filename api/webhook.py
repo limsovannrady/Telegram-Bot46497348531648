@@ -27,7 +27,6 @@ BOT_API        = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DROPMAIL_USER  = "DropmailBot"
 TRIGGER_TEXT   = "restore"
 NEON_DSN       = os.environ.get("NEON_DATABASE_URL", "")
-LOGIN_STATE    = {}          # in-memory (per warm instance)
 
 
 # ───────────────────────── Neon DB connection ──────────────────────
@@ -54,6 +53,13 @@ def init_db():
                     updated_at         TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS login_states (
+                    uid             BIGINT PRIMARY KEY,
+                    state           JSONB NOT NULL,
+                    updated_at      TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
         conn.commit()
 
 
@@ -62,6 +68,47 @@ try:
     log.info("Neon DB initialized")
 except Exception as _e:
     log.warning(f"DB init skipped: {_e}")
+
+
+# ───────────────────────── Login state (Neon) ──────────────────────
+# Stored in DB so multi-step login survives across serverless instances.
+
+def get_login_state(uid: int) -> dict | None:
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT state FROM login_states WHERE uid = %s", (uid,))
+                row = cur.fetchone()
+                return row[0] if row else None
+    except Exception as e:
+        log.warning(f"get_login_state db error: {e}")
+        return None
+
+
+def set_login_state(uid: int, state: dict):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO login_states (uid, state, updated_at)
+                    VALUES (%s, %s::jsonb, NOW())
+                    ON CONFLICT (uid) DO UPDATE
+                        SET state      = EXCLUDED.state,
+                            updated_at = NOW()
+                """, (uid, json.dumps(state)))
+            conn.commit()
+    except Exception as e:
+        log.warning(f"set_login_state db error: {e}")
+
+
+def delete_login_state(uid: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM login_states WHERE uid = %s", (uid,))
+            conn.commit()
+    except Exception as e:
+        log.warning(f"delete_login_state db error: {e}")
 
 
 # ───────────────────────── Bot API helpers ─────────────────────────
@@ -180,41 +227,62 @@ async def _get_me(uid: int) -> dict | None:
         await client.disconnect()
 
 
-async def _do_login_phone(uid: int, phone: str) -> str:
-    """Start phone login, return phone_code_hash or raise."""
+async def _do_login_phone(uid: int, phone: str, st: dict) -> dict:
+    """Request OTP — connect, send_code, DISCONNECT. Returns updated state."""
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
     client = TelegramClient(StringSession(), API_ID, API_HASH)
-    await client.connect()
-    sent = await client.send_code_request(phone)
-    LOGIN_STATE[uid]["client"]          = client
-    LOGIN_STATE[uid]["phone_code_hash"] = sent.phone_code_hash
-    return sent.phone_code_hash
+    try:
+        await client.connect()
+        sent = await client.send_code_request(phone)
+        st["phone_code_hash"] = sent.phone_code_hash
+        st["partial_session"] = client.session.save()
+        return st
+    finally:
+        await client.disconnect()
 
 
-async def _do_login_code(uid: int, code: str):
+async def _do_login_code(uid: int, code: str, st: dict):
+    """Reconnect with partial session, sign in with code. Returns (me, updated_st)."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
     from telethon.errors import SessionPasswordNeededError
 
-    client = LOGIN_STATE[uid]["client"]
-    phone  = LOGIN_STATE[uid]["phone"]
-    hash_  = LOGIN_STATE[uid]["phone_code_hash"]
-    await client.sign_in(phone=phone, code=code, phone_code_hash=hash_)
-    me = await client.get_me()
-    save_session(uid, client.session.save())
-    await client.disconnect()
-    LOGIN_STATE.pop(uid, None)
-    return me
+    client = TelegramClient(StringSession(st.get("partial_session", "")), API_ID, API_HASH)
+    try:
+        await client.connect()
+        try:
+            await client.sign_in(
+                phone=st["phone"],
+                code=code,
+                phone_code_hash=st["phone_code_hash"],
+            )
+        except SessionPasswordNeededError:
+            # Update partial session after code is accepted, needed for 2FA
+            st["partial_session"] = client.session.save()
+            raise
+        me = await client.get_me()
+        save_session(uid, client.session.save())
+        return me
+    finally:
+        await client.disconnect()
 
 
-async def _do_login_password(uid: int, password: str):
-    client = LOGIN_STATE[uid]["client"]
-    await client.sign_in(password=password)
-    me = await client.get_me()
-    save_session(uid, client.session.save())
-    await client.disconnect()
-    LOGIN_STATE.pop(uid, None)
-    return me
+async def _do_login_password(uid: int, password: str, st: dict):
+    """Reconnect with post-code partial session, sign in with 2FA password."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(st.get("partial_session", "")), API_ID, API_HASH)
+    try:
+        await client.connect()
+        await client.sign_in(password=password)
+        me = await client.get_me()
+        save_session(uid, client.session.save())
+        return me
+    finally:
+        await client.disconnect()
 
 
 async def _do_autoclick(uid: int):
@@ -278,15 +346,8 @@ HELP_TEXT = (
 
 
 def _run(coro):
-    """Run async coroutine safely inside a sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Run async coroutine in a fresh event loop (serverless-safe)."""
+    return asyncio.run(coro)
 
 
 def _send_session_hint(chat_id: int, uid: int):
@@ -315,7 +376,7 @@ def handle_message(message: dict):
         if load_session(uid):
             send(chat_id, f"✅ អ្នកបាន login រួចហើយ។\n\n{HELP_TEXT}")
         else:
-            LOGIN_STATE[uid] = {"step": "phone"}
+            set_login_state(uid, {"step": "phone"})
             send(chat_id,
                  "👋 **សួស្តី!**\n\n"
                  "📱 សូមបញ្ចូលលេខទូរស័ព្ទជាមួយកូដប្រទេស\n"
@@ -325,22 +386,14 @@ def handle_message(message: dict):
 
     # ── /cancel ─────────────────────────────────────────────────────
     if text == "/cancel":
-        st = LOGIN_STATE.pop(uid, None)
-        if st and st.get("client"):
-            try:
-                _run(st["client"].disconnect())
-            except Exception:
-                pass
+        delete_login_state(uid)
         send(chat_id, "❌ បានបោះបង់។")
         return
 
     # ── /logout ─────────────────────────────────────────────────────
     if text == "/logout":
-        LOGIN_STATE.pop(uid, None)
+        delete_login_state(uid)
         delete_session(uid)
-        cfgs = load_configs()
-        cfgs.pop(str(uid), None)
-        save_configs(cfgs)
         send(chat_id, "🗑️ Session ត្រូវបានលុប។ វាយ /start ដើម្បី login ម្ដងទៀត។")
         return
 
@@ -413,7 +466,7 @@ def handle_message(message: dict):
         return
 
     # ── Login conversation ───────────────────────────────────────────
-    st = LOGIN_STATE.get(uid)
+    st = get_login_state(uid)
     if not st:
         return
 
@@ -424,13 +477,14 @@ def handle_message(message: dict):
             return
         st["phone"] = phone
         try:
-            _run(_do_login_phone(uid, phone))
-            st["step"] = "code"
+            updated_st = _run(_do_login_phone(uid, phone, st))
+            updated_st["step"] = "code"
+            set_login_state(uid, updated_st)
             send(chat_id,
                  "✉️ Telegram ផ្ញើ **code** ទៅ app។\n\n"
                  "សូមបញ្ចូល code (ឧ. `1 2 3 4 5` — បំបែកតួអក្សរ)")
         except Exception as e:
-            LOGIN_STATE.pop(uid, None)
+            delete_login_state(uid)
             send(chat_id, f"❌ `{e}`")
         return
 
@@ -441,23 +495,27 @@ def handle_message(message: dict):
             send(chat_id, "⚠️ សូមបញ្ចូល code ជាលេខ។")
             return
         try:
-            me = _run(_do_login_code(uid, code))
+            me = _run(_do_login_code(uid, code, st))
+            delete_login_state(uid)
             send(chat_id,
                  f"✅ **Login ជោគជ័យ!**\n\n"
                  f"👤 {me.first_name or ''} {me.last_name or ''}\n"
                  f"ID: `{me.id}`\n\n{HELP_TEXT}")
             _send_session_hint(chat_id, uid)
         except SessionPasswordNeededError:
+            # st["partial_session"] already updated inside _do_login_code
             st["step"] = "password"
+            set_login_state(uid, st)
             send(chat_id, "🔒 Account បើក 2FA។ សូមបញ្ចូលពាក្យសម្ងាត់។")
         except Exception as e:
-            LOGIN_STATE.pop(uid, None)
+            delete_login_state(uid)
             send(chat_id, f"❌ `{e}`")
         return
 
     if st["step"] == "password":
         try:
-            me = _run(_do_login_password(uid, text))
+            me = _run(_do_login_password(uid, text, st))
+            delete_login_state(uid)
             send(chat_id,
                  f"✅ **Login ជោគជ័យ!**\n\n"
                  f"👤 {me.first_name or ''} {me.last_name or ''}\n"
