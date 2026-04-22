@@ -50,8 +50,13 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS user_configs (
                     uid                BIGINT PRIMARY KEY,
                     autoclick_enabled  BOOLEAN DEFAULT FALSE,
+                    clicked_ids        JSONB   DEFAULT '[]'::jsonb,
                     updated_at         TIMESTAMPTZ DEFAULT NOW()
                 );
+            """)
+            cur.execute("""
+                ALTER TABLE user_configs
+                ADD COLUMN IF NOT EXISTS clicked_ids JSONB DEFAULT '[]'::jsonb;
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS login_states (
@@ -337,11 +342,10 @@ HELP_TEXT = (
     "/me — ព័ត៌មាន account\n"
     "/logout — លុប session\n"
     "/cancel — បោះបង់ login\n"
-    "/autoclickon — បើក auto-click\n"
+    "/autoclickon — បើក auto-click (ស្វ័យប្រវត្តិ រៀងរាល់នាទី)\n"
     "/autoclickoff — បិទ auto-click\n"
     "/autoclickstatus — ស្ថានភាព\n"
-    "/clicknow — ចុច Restore button ឥឡូវ\n"
-    "/mysession — បង្ហាញ session string (Vercel env var)"
+    "/mysession — ស្ថានភាព session"
 )
 
 
@@ -431,9 +435,10 @@ def handle_message(message: dict):
         cfg["autoclick_enabled"] = True
         set_user_cfg(uid, cfg)
         send(chat_id,
-             f"🤖 Auto-click **បើក** ហើយ។\n\n"
-             f"វាយ /clicknow ដើម្បីចុច Restore button ឥឡូវ\n"
-             f"_(Webhook mode: auto-listen មិនដំណើរការ — ត្រូវវាយ /clicknow ដោយខ្លួនឯង)_")
+             f"🤖 Auto-click **បើក** ហើយ!\n\n"
+             f"✅ Bot នឹងចុច Restore button **ដោយស្វ័យប្រវត្តិ** រៀងរាល់ **1 នាទី**\n"
+             f"✅ ចុចទាំងអស់ button ក្នុងសារ Restore\n\n"
+             f"_វាយ /autoclickoff ដើម្បីបិទ_")
         return
 
     # ── /autoclickoff ────────────────────────────────────────────────
@@ -451,18 +456,8 @@ def handle_message(message: dict):
         send(chat_id,
              f"**🤖 Auto-click @{DROPMAIL_USER}**\n"
              f"Status: {state}\n"
-             f"Trigger: សារមានពាក្យ `Restore`\n\n"
-             f"វាយ /clicknow ដើម្បីចុច button ឥឡូវ")
-        return
-
-    # ── /clicknow ────────────────────────────────────────────────────
-    if text == "/clicknow":
-        if not load_session(uid):
-            send(chat_id, "⚠️ សូម /start ដើម្បី login មុនសិន។")
-            return
-        send(chat_id, "⏳ កំពុងស្វែងរក Restore button...")
-        result = _run(_do_autoclick(uid))
-        send(chat_id, result)
+             f"Trigger: សារមានពាក្យ `Restore`\n"
+             f"⏱️ រៀបចំជា cron job រៀងរាល់ **1 នាទី**")
         return
 
     # ── Login conversation ───────────────────────────────────────────

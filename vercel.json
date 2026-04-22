@@ -4,15 +4,22 @@
     {
       "src": "api/webhook.py",
       "use": "@vercel/python",
-      "config": {
-        "maxDuration": 60
-      }
+      "config": { "maxDuration": 60 }
+    },
+    {
+      "src": "api/cron.py",
+      "use": "@vercel/python",
+      "config": { "maxDuration": 60 }
     }
   ],
   "routes": [
+    { "src": "/api/webhook", "dest": "api/webhook.py" },
+    { "src": "/api/cron",    "dest": "api/cron.py"    }
+  ],
+  "crons": [
     {
-      "src": "/api/webhook",
-      "dest": "api/webhook.py"
+      "path": "/api/cron",
+      "schedule": "* * * * *"
     }
   ]
 }
